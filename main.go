@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ONSdigital/dp-mongodb-in-memory/download"
-	"github.com/ONSdigital/dp-mongodb-in-memory/monitor"
 	"github.com/ONSdigital/log.go/v2/log"
+	"github.com/iamkoch/dp-mongodb-in-memory/download"
+	"github.com/iamkoch/dp-mongodb-in-memory/monitor"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -33,11 +33,25 @@ type Server struct {
 	dbDir      string
 	port       int
 	replSet    string
+	minLogLvl  LogLevel
 }
+
+type LogLevel int64
+
+const (
+	Dbg LogLevel = iota
+	Inf
+	Wrn
+	Err
+)
 
 // Start runs a MongoDB server of the given version using a random free port and returns the Server.
 func Start(ctx context.Context, version string) (*Server, error) {
 	return StartWithOptions(ctx, version)
+}
+
+func (s *Server) SetMinLogLevel(lvl LogLevel) {
+	s.minLogLvl = lvl
 }
 
 // StartWithReplicaSet runs a MongoDB server (of the given version) as a replica set (with the given name).
@@ -111,7 +125,7 @@ func StartWithOptions(ctx context.Context, version string, so ...ServerOption) (
 
 	startupErrCh := make(chan error)
 	startupPortCh := make(chan int)
-	stdHandler := stdHandler(ctx, startupPortCh, startupErrCh)
+	stdHandler := stdHandler(ctx, startupPortCh, startupErrCh, server.minLogLvl)
 	server.cmd.Stdout = stdHandler
 	server.cmd.Stderr = stdHandler
 
@@ -237,7 +251,7 @@ func getOrDownloadBinPath(ctx context.Context, version string) (string, error) {
 // It accepts 2 channels:
 // errCh will receive any error logged,
 // okCh will receive the port number if mongodb started successfully
-func stdHandler(ctx context.Context, okCh chan<- int, errCh chan<- error) io.Writer {
+func stdHandler(ctx context.Context, okCh chan<- int, errCh chan<- error, minLogLvl LogLevel) io.Writer {
 	reader, writer := io.Pipe()
 
 	go func() {
@@ -262,7 +276,28 @@ func stdHandler(ctx context.Context, okCh chan<- int, errCh chan<- error) io.Wri
 					okCh <- int(attr["port"].(float64))
 				}
 
-				log.Info(ctx, fmt.Sprintf("[mongod] %s", message), logMessage)
+				switch minLogLvl {
+				case Dbg:
+					log.Info(ctx, fmt.Sprintf("[mongod] %s", text))
+				case Inf:
+					if severity == "D" {
+						// debug
+						continue
+					}
+					log.Info(ctx, fmt.Sprintf("[mongod] %s", text))
+				case Wrn:
+					if severity == "D" || severity == "I" {
+						// debug or info
+						continue
+					}
+					log.Warn(ctx, fmt.Sprintf("[mongod] %s", text))
+				case Err:
+					if severity == "D" || severity == "I" || severity == "W" {
+						// debug, info or warning
+						continue
+					}
+					log.Error(ctx, fmt.Sprintf("[mongod] %s", text), nil)
+				}
 			}
 		}
 
